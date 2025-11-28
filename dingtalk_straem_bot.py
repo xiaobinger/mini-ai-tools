@@ -8,15 +8,8 @@ import hmac
 import hashlib
 import base64
 import urllib.parse
-import akshare as ak
-import pandas as pd
 import warnings
 import re
-import socket
-from urllib3.util.retry import Retry
-from urllib3.poolmanager import PoolManager
-from requests.adapters import HTTPAdapter
-
 # 抑制 akshare 的非关键警告（如列缺失）
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -83,7 +76,8 @@ def get_access_token():
 
 
 def get_sock_code_by_name(name: str) -> str | None:
-    sock_name = weather_mcp_with_llm("test_user", f"{name}，直接输出A股股票代码，不要其他任何废话")
+    sock_name = weather_mcp_with_llm("test_user", f"{name}，直接输出A股股票代码,当存在多个股市时返回A股代码，并且加上股市标志开头，比如sh,sz等,不要其他任何废话")
+    logging.info(f"[DEBUG] 获取股票代码({name}) -> {sock_name}")
     return sock_name
 
 def normalize_code(symbol: str) -> str | None:
@@ -115,7 +109,7 @@ def get_stock_data(code):
         url = f"http://qt.gtimg.cn/q={code}"
         response = requests.get(url, timeout=5)
         data = response.text.split('~')
-
+        logging.info(f"[DEBUG] 获取股票数据({code}) -> {data}")
         return {
             'name': data[1],                # 股票名称
             'price': float(data[3]),         # 当前价格
@@ -128,8 +122,8 @@ def get_stock_data(code):
             'change_amt': float(data[31]),    # 涨跌额
             'change_percent': float(data[32].strip('%'))  # 涨跌幅
         }
-    except Exception as e:
-        print("获取数据失败:", e)
+    except Exception as ex:
+        print("获取数据失败:", ex)
         return None
 
 
@@ -147,9 +141,9 @@ def get_stock_quote(symbol: str) -> dict | None:
         if not stock_data:
             return None
         return stock_data
-    except Exception as e:
+    except Exception as ex:
         # 可选：记录日志（不 print，保持干净）
-        print(f"[DEBUG] get_stock_quote({symbol}) failed: {e}")
+        print(f"[DEBUG] get_stock_quote({symbol}) failed: {ex}")
         return None
 
 
@@ -181,7 +175,7 @@ def get_sn_belong_to(sn: str) -> dict:
 def get_weather(city: str) -> dict:
     try:
         geo = requests.get(
-            "http://api.openweathermap.org/geo/1.0/direct",
+            "https://api.openweathermap.org/geo/1.0/direct",
             params={"q": city, "limit": 1, "appid": OPENWEATHER_API_KEY},
             timeout=5
         ).json()
@@ -205,8 +199,8 @@ def get_weather(city: str) -> dict:
             "humidity": weather['main']['humidity'],
             "success": True
         }
-    except Exception as e:
-        return {"error": f"查询失败: {e}", "success": False}
+    except Exception as ex:
+        return {"error": f"查询失败: {ex}", "success": False}
 
 import dashscope
 from dashscope import Generation
@@ -272,8 +266,8 @@ def weather_mcp_with_llm(user_id: str, user_query: str) -> str:
                     resp = resp_list[0]
                 else:
                     return "处理出错: 无法获取响应"
-            except Exception:
-                return "处理出错: 无法获取响应"
+            except Exception as ex:
+                return f"处理出错: 无法获取响应 - {ex}"
         msg = resp.output.choices[0].message
         if msg.get("tool_calls"):
             
@@ -309,8 +303,8 @@ def weather_mcp_with_llm(user_id: str, user_query: str) -> str:
                         final = final_list[0]
                     else:
                         return "处理出错: 无法获取最终响应"
-                except Exception:
-                    return "处理出错: 无法获取最终响应"
+                except Exception as ex:
+                    return f"处理出错: 无法获取最终响应 - {ex}"
                 
             final_output = getattr(final, 'output', final)
             reply_content = str(final_output.choices[0].message.content) or "已处理。"
@@ -325,10 +319,10 @@ def weather_mcp_with_llm(user_id: str, user_query: str) -> str:
             user_conversations[user_id] = user_conversations[user_id][-10:]
             
         return reply_content
-    except Exception as e:
-        return f"处理出错: {str(e)[:80]}"
+    except Exception as ex:
+        return f"处理出错: {str(ex)[:80]}"
 
-def send_to_dingtalk(title, content,atUserId):
+def send_to_dingtalk(title, content, at_user_id):
     timestamp = str(round(time.time() * 1000))
     secret = None
 
@@ -353,7 +347,7 @@ def send_to_dingtalk(title, content,atUserId):
         },
         "at":{
             "atUserIds": [
-                atUserId         
+                at_user_id
             ],
         }
     }
@@ -366,7 +360,7 @@ def send_to_dingtalk(title, content,atUserId):
 
 
 # --- WebSocket 消息处理（修复版）---
-def send_reply(conversation_id: str, bot_id: str, senderId: str, content: str,user_id: str):
+def send_reply(conversation_id: str, sender_id: str, content: str,user_id: str):
     if not ws or not getattr(ws, 'sock', None) or not getattr(ws.sock, 'connected', False):
         logging.warning("❌ WebSocket 未连接，无法回复")
         return
@@ -382,7 +376,7 @@ def send_reply(conversation_id: str, bot_id: str, senderId: str, content: str,us
             "payload": {
                 "conversationId": conversation_id,
                 "robotCode": APP_KEY, # 使用APP_KEY作为robotCode
-                "senderId": senderId,
+                "senderId": sender_id,
                 "msgKey": "sampleText",
                 "msgParam": json.dumps({
                     "content": content
@@ -392,10 +386,10 @@ def send_reply(conversation_id: str, bot_id: str, senderId: str, content: str,us
 
         logging.info(f"📤 发送回复消息: {json.dumps(msg, indent=2, ensure_ascii=False)}")
         #ws.send(json.dumps(msg, ensure_ascii=False))
-        send_to_dingtalk(title="机器人回复", content=content,atUserId=user_id)
+        send_to_dingtalk(title="机器人回复", content=content, at_user_id=user_id)
         logging.info("✅ 回复消息发送成功")
-    except Exception as e:
-        logging.error(f"❌ 发送回复失败: {e}")
+    except Exception as ex:
+        logging.error(f"❌ 发送回复失败: {ex}")
 
 def on_message(ws, message):
     try:
@@ -449,11 +443,11 @@ def on_message(ws, message):
                 # 传递用户ID以启用连续对话功能
                 reply = weather_mcp_with_llm(sender_id, text)
                 logging.info(f"📤 准备回复: {reply}")
-                send_reply(conversation_id, bot_id, sender_id, reply,user_id)
+                send_reply(conversation_id, sender_id, reply,user_id)
             else:
                 logging.info("❌ 消息内容为空，忽略")
-    except Exception as e:
-        logging.exception("💥 处理消息异常")
+    except Exception as ex:
+        logging.exception(f"💥 处理消息异常: {ex}")
 
 def on_error(ws, error):
     logging.error(f"❌ WebSocket 错误: {error}")
@@ -513,8 +507,8 @@ def test_connection():
         llm_sock_name = weather_mcp_with_llm("test_user", f"中国电信，直接输出股票代码，不要其他任何废话")
         logging.info(f"✅ 股票名称测试: {llm_sock_name}")
         return True
-    except Exception as e:
-        logging.error(f"❌ 连接测试失败: {e}")
+    except Exception as ex:
+        logging.error(f"❌ 连接测试失败: {ex}")
         return False
 
 
